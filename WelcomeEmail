@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Welcome to <?= clubName ?></title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        background-color: #f6f6f6;
+      }
+      .container {
+        width: 100%;
+        max-width: 600px;
+        margin: 20px auto;
+        background-color: #ffffff;
+        padding: 20px;
+        border: 1px solid #dddddd;
+      }
+      .header {
+        text-align: center;
+        padding-bottom: 20px;
+      }
+      .content {
+        font-size: 16px;
+        line-height: 1.5;
+        color: #333333;
+      }
+      .list {
+        margin-left: 20px;
+        padding-left: 20px;
+      }
+      .payment-box {
+        border: 1px solid #eeeeee;
+        background: #fafafa;
+        padding: 14px 16px;
+        margin: 16px 0;
+      }
+      .payment-box p {
+        margin: 6px 0;
+      }
+      .footer {
+        text-align: center;
+        font-size: 12px;
+        color: #777777;
+        margin-top: 30px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <img
+          src="https://raw.githubusercontent.com/e1isev/CCCC/refs/heads/main/CCCC_Logo.png"
+          alt="Logo"
+          style="max-width: 200px; height: auto;"
+        />
+      </div>
+
+      <div class="content">
+        <p>Dear <?= firstName ?>,</p>
+
+        <p>
+          Welcome and thank you for joining <?= clubName ?>. We are excited to have you on board.
+          We have registered your email address as <strong><?= email ?></strong> in our system.
+        </p>
+
+        <p>Please find below the details regarding your membership:</p>
+        <ul class="list">
+          <li>A once-a-year membership fee of <strong>$<?= membershipFee ?></strong> applies.</li>
+          <li>Membership lasts one year from the date payment is received.</li>
+          <li>Membership includes unlimited car applications during the membership period.</li>
+        </ul>
+
+        <div class="payment-box">
+          <p><strong>Payment details</strong></p>
+          <p>Account name: <?= bankAccountName ?></p>
+          <p>BSB: <?= bankBsb ?></p>
+          <p>Account number: <?= bankAccountNumber ?></p>
+        </div>
+
+        <p>
+          If you have any questions or need assistance, please do not hesitate to get in touch.
+        </p>
+
+        <p>Best regards,</p>
+        <p><?= clubName ?></p>
+      </div>
+
+      <div class="footer">
+        <p>&copy; <?= currentYear ?> <?= clubName ?>. All rights reserved.</p>
+      </div>
+    </div>
+  </body>
+</html>
