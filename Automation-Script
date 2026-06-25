@@ -1,0 +1,673 @@
+const SCRIPT_VERSION = "v2026-04-01.6";
+
+const CFG = {
+  SHEET_NAME: "Members",
+  FORM_NOTIFICATION_SHEET_NAME: "",
+  TZ: "Australia/Sydney",
+  CLUB_NAME: "Cruiser Collective Car Club",
+  ADMIN_NOTIFICATION_EMAIL: "",
+  MEMBERSHIP_FEE: "100",
+  PAYMENT_METHOD: "Bank transfer",
+  CAR_FORM_URL: "https://forms.gle/mFDYSnRHfBgDgUXx8",
+  BANK_ACCOUNT_NAME: "CCCC",
+  BANK_BSB: "633123",
+  BANK_ACCOUNT_NUMBER: "208821777",
+
+  COL_FIRST_NAME: 2,      // B
+  COL_LAST_NAME: 3,       // C
+  COL_PAID: 4,            // D
+  COL_EMAIL: 15,          // O
+  COL_EMAIL_STATUS: 16,   // P
+  COL_CAR_ADDED_FLAG: 17, // Q
+  COL_CAR_FORM_STATUS: 18,// R
+  COL_RECEIPT_STATUS: 19  // S
+};
+
+const EMAIL_TYPES = {
+  welcome: {
+    name: "Welcome",
+    template: "welcome",
+    subject: "Welcome to " + CFG.CLUB_NAME,
+    statusColumn: CFG.COL_EMAIL_STATUS,
+    sentMarkers: ["email sent", "welcome sent"],
+    sentLabel: "Welcome Sent",
+    blockedLabel: "Welcome Blocked",
+    failedLabel: "Welcome Failed",
+    shouldSend: function(member) {
+      return !hasAnyMarker_(member.emailStatus, this.sentMarkers);
+    },
+    buildTemplateData: function(member) {
+      return buildBaseTemplateData_(member);
+    }
+  },
+  receipt: {
+    name: "Receipt",
+    template: "MembershipPaid",
+    subject: "Membership Receipt, " + CFG.CLUB_NAME,
+    statusColumn: CFG.COL_RECEIPT_STATUS,
+    sentMarkers: ["receipt sent"],
+    sentLabel: "Receipt Sent",
+    blockedLabel: "Receipt Blocked",
+    failedLabel: "Receipt Failed",
+    shouldSend: function(member) {
+      return member.paid === "yes" && !hasAnyMarker_(member.receiptStatus, this.sentMarkers);
+    },
+    buildTemplateData: function(member) {
+      return Object.assign(buildBaseTemplateData_(member), buildReceiptDetails_(member.rowNumber));
+    }
+  },
+  carForm: {
+    name: "Car Form",
+    template: "CarForm",
+    subject: "Add your car, " + CFG.CLUB_NAME,
+    statusColumn: CFG.COL_CAR_FORM_STATUS,
+    sentMarkers: ["car form email sent", "car form sent"],
+    sentLabel: "Car Form Sent",
+    blockedLabel: "Car Form Blocked",
+    failedLabel: "Car Form Failed",
+    shouldSend: function(member) {
+      return member.carAddedFlag === "no" && !hasAnyMarker_(member.carFormStatus, this.sentMarkers);
+    },
+    buildTemplateData: function(member) {
+      return buildBaseTemplateData_(member);
+    }
+  }
+};
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Club Emails")
+    .addItem("Send welcome emails", "sendWelcomeEmails")
+    .addItem("Send membership receipts", "sendMembershipReceipts")
+    .addItem("Send car-form emails", "sendAddCarFormEmails")
+    .addSeparator()
+    .addItem("Install paid receipt trigger", "installPaidReceiptTrigger")
+    .addItem("Remove paid receipt trigger", "removePaidReceiptTrigger")
+    .addItem("Install form notification trigger", "installFormSubmissionNotificationTrigger")
+    .addItem("Remove form notification trigger", "removeFormSubmissionNotificationTrigger")
+    .addSeparator()
+    .addItem("Review all pending emails", "reviewAllPendingEmails")
+    .addToUi();
+}
+
+function sendWelcomeEmails() {
+  return runManualEmailType_("welcome");
+}
+
+function sendMembershipReceipts() {
+  return runManualEmailType_("receipt");
+}
+
+function sendAddCarFormEmails() {
+  return runManualEmailType_("carForm");
+}
+
+function reviewAllPendingEmails() {
+  var summaries = [];
+
+  ["welcome", "receipt", "carForm"].forEach(function(typeKey) {
+    summaries.push(processEmailType_(typeKey, { requireConfirm: true }));
+  });
+
+  showCombinedSummary_(summaries);
+  return summaries;
+}
+
+function installPaidReceiptTrigger() {
+  var ss = SpreadsheetApp.getActive();
+
+  deleteProjectTriggersByHandler_("handlePaidStatusEdit");
+
+  ScriptApp.newTrigger("handlePaidStatusEdit")
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+}
+
+function removePaidReceiptTrigger() {
+  var removed = deleteProjectTriggersByHandler_("handlePaidStatusEdit");
+
+  SpreadsheetApp.getUi().alert(
+    "Paid receipt trigger removed",
+    removed
+      ? "The paid receipt trigger has been removed."
+      : "No paid receipt trigger was found.",
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+function installFormSubmissionNotificationTrigger() {
+  var ss = SpreadsheetApp.getActive();
+  var installerEmail = detectInstallerEmail_();
+
+  deleteProjectTriggersByHandler_("handleFormSubmission");
+
+  ScriptApp.newTrigger("handleFormSubmission")
+    .forSpreadsheet(ss)
+    .onFormSubmit()
+    .create();
+
+  if (isValidEmail_(installerEmail)) {
+    PropertiesService.getScriptProperties().setProperty("FORM_NOTIFICATION_EMAIL", installerEmail);
+  }
+}
+
+function removeFormSubmissionNotificationTrigger() {
+  var removed = deleteProjectTriggersByHandler_("handleFormSubmission");
+
+  SpreadsheetApp.getUi().alert(
+    "Form notification trigger removed",
+    removed
+      ? "The form notification trigger has been removed."
+      : "No form notification trigger was found.",
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Installable on edit trigger.
+ * Prompts before sending a receipt when column D changes from No to Yes.
+ */
+function handlePaidStatusEdit(e) {
+  if (!e || !e.range) return;
+
+  var range = e.range;
+  var sheet = range.getSheet();
+
+  if (sheet.getName() !== CFG.SHEET_NAME) return;
+  if (range.getRow() < 2) return;
+  if (range.getColumn() !== CFG.COL_PAID) return;
+  if (range.getNumRows() !== 1 || range.getNumColumns() !== 1) return;
+
+  var newValue = normalizeLower_(e.value);
+  var oldValue = normalizeLower_(e.oldValue);
+  if (oldValue !== "no" || newValue !== "yes") return;
+
+  var rowNumber = range.getRow();
+  var member = loadMembers_(sheet, [rowNumber])[0];
+  var ui = SpreadsheetApp.getUi();
+
+  if (!member || !EMAIL_TYPES.receipt.shouldSend(member)) return;
+
+  if (!isValidEmail_(member.email)) {
+    writeStatus_(
+      sheet,
+      rowNumber,
+      EMAIL_TYPES.receipt.statusColumn,
+      EMAIL_TYPES.receipt.blockedLabel + " | Invalid email"
+    );
+    ui.alert(
+      "Receipt not created",
+      "Row " + rowNumber + " was changed to Yes, but the email in column O is invalid.",
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+
+  var response = ui.alert(
+    "Create Receipt?",
+    "Row: " + rowNumber +
+      "\nName: " + buildFullName_(member.firstName, member.lastName) +
+      "\nEmail: " + member.email +
+      "\n\nColumn D was just changed from No to Yes.\nDo you want to create and send the membership receipt now?",
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) return;
+
+  processEmailType_("receipt", {
+    sheet: sheet,
+    rowNumbers: [rowNumber],
+    requireConfirm: false
+  });
+}
+
+/**
+ * Installable on form submit trigger.
+ * Sends an admin notification when a new form response is added to the Members sheet.
+ */
+function handleFormSubmission(e) {
+  if (!e || !e.range) return;
+
+  var range = e.range;
+  var sheet = range.getSheet();
+  if (CFG.FORM_NOTIFICATION_SHEET_NAME && sheet.getName() !== CFG.FORM_NOTIFICATION_SHEET_NAME) return;
+
+  var rowNumber = range.getRow();
+  if (rowNumber < 2) return;
+
+  var recipient = getNotificationRecipient_();
+  if (!isValidEmail_(recipient)) {
+    Logger.log("Form notification skipped because notification email is invalid: " + recipient);
+    return;
+  }
+
+  var member = getFormSubmissionMember_(sheet, rowNumber, e);
+  var subject = buildFormNotificationSubject_(member, rowNumber);
+  var body = buildFormNotificationBody_(sheet, rowNumber, e, member);
+
+  MailApp.sendEmail({
+    to: recipient,
+    subject: subject,
+    body: body,
+    name: CFG.CLUB_NAME
+  });
+}
+
+function runManualEmailType_(typeKey) {
+  var summary = processEmailType_(typeKey, { requireConfirm: true });
+  showProcessingSummary_(typeKey, summary);
+  return summary;
+}
+
+function processEmailType_(typeKey, options) {
+  options = options || {};
+
+  var emailType = EMAIL_TYPES[typeKey];
+  if (!emailType) {
+    throw new Error("Unknown email type: " + typeKey);
+  }
+
+  var sheet = options.sheet || getMembersSheet_();
+  var members = loadMembers_(sheet, options.rowNumbers);
+  var ui = options.requireConfirm ? SpreadsheetApp.getUi() : null;
+  var summary = createSummary_(typeKey, members.length);
+
+  members.forEach(function(member) {
+    if (!emailType.shouldSend(member)) {
+      summary.notEligible++;
+      return;
+    }
+
+    summary.eligible++;
+
+    if (!isValidEmail_(member.email)) {
+      summary.invalid++;
+      writeStatus_(
+        sheet,
+        member.rowNumber,
+        emailType.statusColumn,
+        emailType.blockedLabel + " | Invalid email"
+      );
+      Logger.log(emailType.name + " blocked on row " + member.rowNumber + ": invalid email " + member.email);
+      return;
+    }
+
+    var subject = resolveValue_(emailType.subject, member);
+    if (ui && !confirmBeforeSend_(ui, member.rowNumber, member.firstName, member.lastName, member.email, subject)) {
+      summary.skipped++;
+      Logger.log(emailType.name + " skipped by user on row " + member.rowNumber + " for " + member.email);
+      return;
+    }
+
+    try {
+      MailApp.sendEmail({
+        to: member.email,
+        subject: subject,
+        htmlBody: getHtmlEmailFromFile_(emailType.template, emailType.buildTemplateData(member)),
+        name: CFG.CLUB_NAME
+      });
+
+      writeStatus_(sheet, member.rowNumber, emailType.statusColumn, emailType.sentLabel);
+      summary.sent++;
+    } catch (err) {
+      summary.failed++;
+      writeStatus_(
+        sheet,
+        member.rowNumber,
+        emailType.statusColumn,
+        emailType.failedLabel + " | " + cleanStatusText_(err && err.message ? err.message : String(err))
+      );
+      Logger.log(
+        "Failed to send " + emailType.name + " on row " + member.rowNumber +
+        " to " + member.email + ". Error: " + err
+      );
+    }
+  });
+
+  Logger.log(typeKey + " summary: " + JSON.stringify(summary));
+  return summary;
+}
+
+function getMembersSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(CFG.SHEET_NAME);
+  if (!sheet) {
+    throw new Error("Sheet not found: " + CFG.SHEET_NAME);
+  }
+  return sheet;
+}
+
+function loadMembers_(sheet, rowNumbers) {
+  var lastColumn = Math.max(sheet.getLastColumn(), CFG.COL_RECEIPT_STATUS);
+
+  if (rowNumbers && rowNumbers.length) {
+    return rowNumbers.map(function(rowNumber) {
+      var row = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+      return buildMember_(rowNumber, row);
+    });
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var values = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
+  return values.map(function(row, index) {
+    return buildMember_(index + 2, row);
+  });
+}
+
+function buildMember_(rowNumber, row) {
+  return {
+    rowNumber: rowNumber,
+    firstName: normalizeString_(row[CFG.COL_FIRST_NAME - 1]),
+    lastName: normalizeString_(row[CFG.COL_LAST_NAME - 1]),
+    paid: normalizeLower_(row[CFG.COL_PAID - 1]),
+    email: normalizeString_(row[CFG.COL_EMAIL - 1]),
+    emailStatus: normalizeString_(row[CFG.COL_EMAIL_STATUS - 1]),
+    carAddedFlag: normalizeLower_(row[CFG.COL_CAR_ADDED_FLAG - 1]),
+    carFormStatus: normalizeString_(row[CFG.COL_CAR_FORM_STATUS - 1]),
+    receiptStatus: normalizeString_(row[CFG.COL_RECEIPT_STATUS - 1])
+  };
+}
+
+function buildBaseTemplateData_(member) {
+  return {
+    firstName: member.firstName,
+    lastName: member.lastName,
+    email: member.email,
+    clubName: CFG.CLUB_NAME,
+    membershipFee: CFG.MEMBERSHIP_FEE,
+    paymentMethod: CFG.PAYMENT_METHOD,
+    carFormUrl: CFG.CAR_FORM_URL,
+    bankAccountName: CFG.BANK_ACCOUNT_NAME,
+    bankBsb: CFG.BANK_BSB,
+    bankAccountNumber: CFG.BANK_ACCOUNT_NUMBER,
+    currentYear: Utilities.formatDate(new Date(), CFG.TZ, "yyyy")
+  };
+}
+
+function buildReceiptDetails_(rowNumber) {
+  var now = new Date();
+  var startDate = new Date(now);
+  var endDate = new Date(startDate);
+  endDate.setFullYear(endDate.getFullYear() + 1);
+
+  return {
+    receiptNumber: "CCCC" + Utilities.formatDate(now, CFG.TZ, "yyyyMMdd") + rowNumber,
+    receiptDate: Utilities.formatDate(now, CFG.TZ, "dd MMMM yyyy"),
+    membershipStartDate: Utilities.formatDate(startDate, CFG.TZ, "dd MMMM yyyy"),
+    membershipEndDate: Utilities.formatDate(endDate, CFG.TZ, "dd MMMM yyyy")
+  };
+}
+
+function createSummary_(typeKey, evaluatedCount) {
+  return {
+    type: typeKey,
+    evaluated: evaluatedCount,
+    eligible: 0,
+    sent: 0,
+    skipped: 0,
+    invalid: 0,
+    failed: 0,
+    notEligible: 0
+  };
+}
+
+function resolveValue_(value, member) {
+  return typeof value === "function" ? value(member) : value;
+}
+
+function hasAnyMarker_(statusValue, markers) {
+  var normalized = normalizeLower_(statusValue);
+  return markers.some(function(marker) {
+    return normalized.indexOf(marker) === 0;
+  });
+}
+
+function writeStatus_(sheet, rowNumber, columnNumber, label) {
+  sheet.getRange(rowNumber, columnNumber).setValue(label + " | " + formatTimestamp_(new Date()));
+}
+
+function formatTimestamp_(date) {
+  return Utilities.formatDate(date, CFG.TZ, "yyyy-MM-dd HH:mm:ss");
+}
+
+function cleanStatusText_(text) {
+  return normalizeString_(text).replace(/\s+/g, " ").substring(0, 120);
+}
+
+function showProcessingSummary_(typeKey, summary) {
+  var emailType = EMAIL_TYPES[typeKey];
+  SpreadsheetApp.getUi().alert(
+    emailType.name + " emails processed",
+    "Evaluated: " + summary.evaluated +
+      "\nEligible: " + summary.eligible +
+      "\nSent: " + summary.sent +
+      "\nSkipped: " + summary.skipped +
+      "\nInvalid: " + summary.invalid +
+      "\nFailed: " + summary.failed +
+      "\nNot eligible: " + summary.notEligible,
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+function showCombinedSummary_(summaries) {
+  var message = summaries.map(function(summary) {
+    var emailType = EMAIL_TYPES[summary.type];
+    return emailType.name +
+      ": sent " + summary.sent +
+      ", skipped " + summary.skipped +
+      ", invalid " + summary.invalid +
+      ", failed " + summary.failed;
+  }).join("\n");
+
+  SpreadsheetApp.getUi().alert(
+    "Pending email review complete",
+    message,
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+function confirmBeforeSend_(ui, rowNumber, firstName, lastName, email, subject) {
+  var fullName = buildFullName_(firstName, lastName);
+
+  var response = ui.alert(
+    "Send Email?",
+    "Row: " + rowNumber +
+      "\nName: " + fullName +
+      "\nEmail: " + email +
+      "\nSubject: " + subject +
+      "\n\nDo you want to send this email?",
+    ui.ButtonSet.YES_NO
+  );
+
+  return response === ui.Button.YES;
+}
+
+function getHtmlEmailFromFile_(fileName, vars) {
+  var template = HtmlService.createTemplateFromFile(fileName);
+  Object.keys(vars || {}).forEach(function(key) {
+    template[key] = vars[key];
+  });
+  return template.evaluate().getContent();
+}
+
+function getNotificationRecipient_() {
+  var configuredEmail = normalizeString_(CFG.ADMIN_NOTIFICATION_EMAIL);
+  if (isValidEmail_(configuredEmail)) return configuredEmail;
+
+  var storedEmail = normalizeString_(
+    PropertiesService.getScriptProperties().getProperty("FORM_NOTIFICATION_EMAIL")
+  );
+  if (isValidEmail_(storedEmail)) return storedEmail;
+
+  var effectiveUserEmail = detectInstallerEmail_();
+  if (isValidEmail_(effectiveUserEmail)) return effectiveUserEmail;
+
+  return "";
+}
+
+function detectInstallerEmail_() {
+  var candidates = [
+    safeEmailLookup_(function() {
+      return Session.getEffectiveUser().getEmail();
+    }),
+    safeEmailLookup_(function() {
+      return Session.getActiveUser().getEmail();
+    })
+  ];
+
+  for (var i = 0; i < candidates.length; i++) {
+    if (isValidEmail_(candidates[i])) {
+      return candidates[i];
+    }
+  }
+
+  return "";
+}
+
+function buildFormNotificationSubject_(member, rowNumber) {
+  var fullName = buildFullName_(member && member.firstName, member && member.lastName);
+  if (fullName === "(No name)" && member && member.email) {
+    fullName = member.email;
+  }
+
+  return "New " + CFG.CLUB_NAME + " form submission - " + fullName + " (row " + rowNumber + ")";
+}
+
+function getFormSubmissionMember_(sheet, rowNumber, event) {
+  if (sheet.getName() === CFG.SHEET_NAME) {
+    return loadMembers_(sheet, [rowNumber])[0];
+  }
+
+  var namedValues = (event && event.namedValues) || {};
+  var fullName = pickNamedValue_(namedValues, ["full name", "name"]);
+  var firstName = pickNamedValue_(namedValues, ["first name", "first", "given name"]);
+  var lastName = pickNamedValue_(namedValues, ["last name", "last", "surname", "family name"]);
+
+  if (!firstName && fullName) {
+    firstName = fullName;
+  }
+
+  return {
+    firstName: firstName,
+    lastName: lastName,
+    email: pickNamedValue_(namedValues, ["email", "email address"])
+  };
+}
+
+function buildFormNotificationBody_(sheet, rowNumber, event, member) {
+  var lines = [
+    "A new form submission was received.",
+    "",
+    "Sheet: " + sheet.getName(),
+    "Row: " + rowNumber
+  ];
+
+  if (member) {
+    if (member.firstName || member.lastName) {
+      lines.push("Name: " + buildFullName_(member.firstName, member.lastName));
+    }
+    if (member.email) {
+      lines.push("Email: " + member.email);
+    }
+  }
+
+  lines.push("");
+  lines.push("Submission details:");
+
+  var details = getNamedValueLines_(event);
+  if (!details.length) {
+    details = getRowDetailLines_(sheet, rowNumber);
+  }
+
+  return lines.concat(details).join("\n");
+}
+
+function getNamedValueLines_(event) {
+  if (!event || !event.namedValues) return [];
+
+  return Object.keys(event.namedValues).map(function(key) {
+    var values = event.namedValues[key];
+    return key + ": " + (values || []).join(", ");
+  });
+}
+
+function pickNamedValue_(namedValues, candidateKeys) {
+  var normalizedMap = {};
+
+  Object.keys(namedValues || {}).forEach(function(key) {
+    normalizedMap[normalizeLower_(key)] = namedValues[key];
+  });
+
+  for (var i = 0; i < candidateKeys.length; i++) {
+    var values = normalizedMap[normalizeLower_(candidateKeys[i])];
+    if (!values || !values.length) continue;
+
+    var value = normalizeString_(values[0]);
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function getRowDetailLines_(sheet, rowNumber) {
+  var lastColumn = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+  var values = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+
+  return headers.reduce(function(lines, header, index) {
+    var label = normalizeString_(header);
+    var value = normalizeString_(values[index]);
+    if (!label || !value) return lines;
+
+    lines.push(label + ": " + value);
+    return lines;
+  }, []);
+}
+
+function deleteProjectTriggersByHandler_(handlerName) {
+  var removed = false;
+
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (trigger.getHandlerFunction() !== handlerName) return;
+
+    ScriptApp.deleteTrigger(trigger);
+    removed = true;
+  });
+
+  return removed;
+}
+
+function normalizeString_(value) {
+  return String(value == null ? "" : value).trim();
+}
+
+function safeEmailLookup_(fn) {
+  try {
+    return normalizeString_(fn());
+  } catch (err) {
+    Logger.log("Email lookup failed: " + err);
+    return "";
+  }
+}
+
+function normalizeLower_(value) {
+  return normalizeString_(value).toLowerCase();
+}
+
+function buildFullName_(firstName, lastName) {
+  var fullName = ((firstName || "") + " " + (lastName || "")).trim();
+  return fullName || "(No name)";
+}
+
+function isValidEmail_(email) {
+  var e = normalizeString_(email);
+  if (!e) return false;
+
+  var lower = e.toLowerCase();
+  if (lower === "email address" || lower === "email") return false;
+
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
