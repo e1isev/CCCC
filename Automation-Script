@@ -252,6 +252,14 @@ function handleFormSubmission(e) {
     body: body,
     name: CFG.CLUB_NAME
   });
+
+  if (sheet.getName() === CFG.SHEET_NAME) {
+    processEmailType_("welcome", {
+      sheet: sheet,
+      rowNumbers: [rowNumber],
+      requireConfirm: false
+    });
+  }
 }
 
 function runManualEmailType_(typeKey) {
