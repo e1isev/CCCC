@@ -224,7 +224,8 @@ function handlePaidStatusEdit(e) {
 
 /**
  * Installable on form submit trigger.
- * Sends an admin notification when a new form response is added to the Members sheet.
+ * Sends an admin notification and a "form received" auto-reply to the submitter
+ * when a new form response is added to the Members sheet.
  */
 function handleFormSubmission(e) {
   if (!e || !e.range) return;
@@ -253,11 +254,12 @@ function handleFormSubmission(e) {
     name: CFG.CLUB_NAME
   });
 
-  if (sheet.getName() === CFG.SHEET_NAME) {
-    processEmailType_("welcome", {
-      sheet: sheet,
-      rowNumbers: [rowNumber],
-      requireConfirm: false
+  if (isValidEmail_(member && member.email)) {
+    MailApp.sendEmail({
+      to: member.email,
+      subject: "We've received your form, " + CFG.CLUB_NAME,
+      htmlBody: getHtmlEmailFromFile_("FormReceived", buildBaseTemplateData_(member)),
+      name: CFG.CLUB_NAME
     });
   }
 }
